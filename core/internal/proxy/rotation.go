@@ -270,7 +270,6 @@ func NewRateLimitedSelector(
 func (s *RateLimitedSelector) Select(ctx context.Context) (*models.Proxy, error) {
 	s.mu.RLock()
 	allProxies := s.proxies
-	currentIdx := s.currentIndex
 	cachedProxies := s.cache
 	cacheValid := time.Now().Before(s.cacheExpiry) && len(cachedProxies) > 0
 	s.mu.RUnlock()
