@@ -67,6 +67,15 @@ Environment variables are loaded in `core/internal/config/config.go`.
 - `DB_SSLMODE` (default `disable`)
 - `ROTA_ADMIN_USER` (default `admin`)
 - `ROTA_ADMIN_PASSWORD` (default `admin`)
+- `WEBSHARE_API_KEY` (default empty, enables Webshare sync)
+- `WEBSHARE_SYNC_INTERVAL_SECONDS` (default `0`, disables auto-sync)
+- `WEBSHARE_MODE` (`direct|backbone`, default `direct`)
+
+## Recent Updates
+- Added `GET /health` on the proxy server (port `8000`) for liveness checks.
+- Added `GET /api/v1/health` alias for API health.
+- Added `POST /api/v1/proxies/bulk-test` to test multiple proxies in one call.
+- Added `healthcheck.retest_failed_after_minutes` to settings (migration version `12`).
 
 ## API Surface (Backend)
 Base URL: `http://<host>:8001`
@@ -111,6 +120,10 @@ Base URL: `http://<host>:8001`
 - `GET /api/v1/settings`
 - `PUT /api/v1/settings`
 - `POST /api/v1/settings/reset`
+
+### Webshare
+- `POST /api/v1/webshare/sync`
+- `GET /api/v1/webshare/sync/status`
 
 ### WebSockets
 - `GET /ws/dashboard`
@@ -168,12 +181,30 @@ sequenceDiagram
     API-->>UI: Updated config
 ```
 
+### Webshare IP Update (Sync)
+```mermaid
+sequenceDiagram
+    participant UI as Dashboard
+    participant API as API :8001
+    participant WS as Webshare API
+    participant DB as Postgres
+    UI->>API: POST /api/v1/webshare/sync
+    API->>DB: Create sync status (IN-PROGRESS)
+    API->>WS: List proxies (mode direct/backbone)
+    WS-->>API: Proxy list (valid/invalid)
+    API->>DB: Add new proxies / remove missing
+    API->>WS: Request replacements for unhealthy IPs (async)
+    API->>DB: Update sync status (SUCCESS/FAILED + ip_added/removed/replaced)
+    API-->>UI: started/already_running
+```
+
 ## Data Model Overview
 Key tables (see `core/internal/database/migrations.go`):
 - `proxies` — proxy inventory + status, usage stats.
 - `proxy_requests` — time series of proxy requests (Timescale hypertable).
 - `logs` — application logs (Timescale hypertable).
 - `settings` — JSONB config by key.
+- `webshare_sync_status` — sync history (status, logs, ip_added/removed/replaced).
 
 Important settings keys:
 - `authentication` — proxy auth (applies to :8000).
@@ -182,9 +213,24 @@ Important settings keys:
 - `healthcheck` — timeout, workers, url, status, headers, `retest_failed_after_minutes`.
 - `log_retention` — retention policy.
 
+## Webshare IP Update Details
+Webshare sync keeps the Rota proxy pool aligned with Webshare inventory.
+- **Trigger**: Manual via `POST /api/v1/webshare/sync` or automatic scheduler.
+- **Scheduler**: controlled by `WEBSHARE_SYNC_INTERVAL_SECONDS`; `0` disables.
+- **Mode**: `WEBSHARE_MODE` selects Webshare proxy pool (`direct` or `backbone`).
+- **Behavior**:
+  - Fetch Webshare proxies and compare against Rota pool.
+  - **Add** proxies found in Webshare but missing in Rota.
+  - **Remove** proxies that no longer exist in Webshare.
+  - **Replace** unhealthy Webshare proxies by requesting replacements and removing them from Rota.
+- **Status tracking**:
+  - Stored in `webshare_sync_status` with `ip_added`, `ip_removed`, `ip_replaced`, logs and errors.
+  - Dashboard polls `GET /api/v1/webshare/sync/status` for last/current sync and next sync time.
+
 ## Notable Integrations
 - **TimescaleDB** used for `logs` and `proxy_requests` for efficient retention/compression.
 - **goproxy** handles CONNECT and HTTP proxying in `core/internal/proxy`.
+- **Webshare API** used to sync proxy inventory and request replacements for unhealthy IPs.
 
 ## Operations
 Health endpoints:

@@ -291,6 +291,10 @@ var migrations = []Migration{
 			DROP INDEX IF EXISTS idx_webshare_sync_status_status;
 			DROP INDEX IF EXISTS idx_webshare_sync_status_synced_at;
 			DROP TABLE IF EXISTS webshare_sync_status;
+		`,
+	},
+	{
+		Version:     13,
 		Description: "Add healthcheck retest_failed_after_minutes setting",
 		Up: `
 			UPDATE settings
@@ -473,3 +477,4 @@ func (db *DB) GetMigrationStatus(ctx context.Context) ([]map[string]interface{},
 
 	return status, nil
 }
+
