@@ -291,6 +291,21 @@ var migrations = []Migration{
 			DROP INDEX IF EXISTS idx_webshare_sync_status_status;
 			DROP INDEX IF EXISTS idx_webshare_sync_status_synced_at;
 			DROP TABLE IF EXISTS webshare_sync_status;
+		Description: "Add healthcheck retest_failed_after_minutes setting",
+		Up: `
+			UPDATE settings
+			SET value = jsonb_set(
+				value,
+				'{retest_failed_after_minutes}',
+				'0'::jsonb
+			)
+			WHERE key = 'healthcheck'
+			AND NOT (value ? 'retest_failed_after_minutes');
+		`,
+		Down: `
+			UPDATE settings
+			SET value = value - 'retest_failed_after_minutes'
+			WHERE key = 'healthcheck';
 		`,
 	},
 }
