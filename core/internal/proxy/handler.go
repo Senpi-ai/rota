@@ -158,6 +158,11 @@ func ensureGetBody(req *http.Request) error {
 func (h *UpstreamProxyHandler) sendWithRetry(req *http.Request, ctx context.Context) (*http.Response, int, error) {
 	// Ensure we can retry: each attempt needs a fresh body (avoids "invalid Read on closed Body")
 	if err := ensureGetBody(req); err != nil {
+		h.logger.Warn("retry body fix unavailable - retries may fail with invalid Read on closed Body",
+			"source", "proxy",
+			"url", req.URL.String(),
+			"error", err,
+		)
 		return nil, 0, err
 	}
 
@@ -308,9 +313,27 @@ func (h *UpstreamProxyHandler) tryProxyWithRetries(req *http.Request, ctx contex
 			freshBody, err := req.GetBody()
 			if err != nil {
 				lastErr = fmt.Errorf("get body for retry: %w", err)
+				h.logger.Warn("retry body fix failed - could not get fresh body for retry (may see invalid Read on closed Body)",
+					"source", "proxy",
+					"proxy_id", selectedProxy.ID,
+					"proxy_address", selectedProxy.Address,
+					"retry", retry+1,
+					"url", req.URL.String(),
+					"error", err,
+				)
 				continue
 			}
 			clonedReq.Body = freshBody
+			// DEBUG: proves "invalid Read on closed Body" fix - retry using fresh body from GetBody (comment out in prod)
+			if retry > 0 {
+				h.logger.Info("retry using fresh body from GetBody (closed-Body fix verified)",
+					"source", "proxy",
+					"proxy_id", selectedProxy.ID,
+					"proxy_address", selectedProxy.Address,
+					"retry", retry+1,
+					"url", req.URL.String(),
+				)
+			}
 		}
 
 		// CRITICAL FIX: Clear RequestURI for client requests
