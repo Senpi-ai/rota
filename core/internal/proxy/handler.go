@@ -1,9 +1,11 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"strings"
@@ -122,8 +124,48 @@ func (h *UpstreamProxyHandler) HandleRequest(req *http.Request, ctx *goproxy.Pro
 	return req, resp
 }
 
+// maxBodyBufferSize is the maximum request body size we buffer for retries (10MB).
+// Larger bodies are not buffered; retries may then fail with "closed Body" if the first attempt fails.
+const maxBodyBufferSize = 10 << 20
+
+// ensureGetBody ensures req.GetBody is set so retries can get a fresh body.
+// If req has a Body but no GetBody, the body is buffered and GetBody is set.
+// This prevents "http: invalid Read on closed Body" when retrying after the first attempt consumes the body.
+// Bodies larger than maxBodyBufferSize are not buffered to avoid unbounded memory use.
+func ensureGetBody(req *http.Request) error {
+	if req.Body == nil || req.GetBody != nil {
+		return nil
+	}
+	slurp, err := io.ReadAll(io.LimitReader(req.Body, maxBodyBufferSize+1))
+	if err != nil {
+		return fmt.Errorf("buffering request body for retry: %w", err)
+	}
+	if err := req.Body.Close(); err != nil {
+		return fmt.Errorf("closing request body: %w", err)
+	}
+	if int64(len(slurp)) > maxBodyBufferSize {
+		return fmt.Errorf("request body too large for retry buffering (max %d bytes)", maxBodyBufferSize)
+	}
+	req.Body = io.NopCloser(bytes.NewReader(slurp))
+	req.ContentLength = int64(len(slurp))
+	req.GetBody = func() (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(slurp)), nil
+	}
+	return nil
+}
+
 // sendWithRetry attempts to send the request with retry and fallback logic
 func (h *UpstreamProxyHandler) sendWithRetry(req *http.Request, ctx context.Context) (*http.Response, int, error) {
+	// Ensure we can retry: each attempt needs a fresh body (avoids "invalid Read on closed Body")
+	if err := ensureGetBody(req); err != nil {
+		h.logger.Warn("retry body fix unavailable - retries may fail with invalid Read on closed Body",
+			"source", "proxy",
+			"url", req.URL.String(),
+			"error", err,
+		)
+		return nil, 0, err
+	}
+
 	maxFallbackRetries := h.settings.FallbackMaxRetries
 	if !h.settings.Fallback {
 		maxFallbackRetries = 1
@@ -265,8 +307,34 @@ func (h *UpstreamProxyHandler) tryProxyWithRetries(req *http.Request, ctx contex
 			},
 		}
 
-		// Clone the request for retry
+		// Clone the request for retry (clone shares Body; give it a fresh body from GetBody for this attempt)
 		clonedReq := req.Clone(ctx)
+		if req.GetBody != nil {
+			freshBody, err := req.GetBody()
+			if err != nil {
+				lastErr = fmt.Errorf("get body for retry: %w", err)
+				h.logger.Warn("retry body fix failed - could not get fresh body for retry (may see invalid Read on closed Body)",
+					"source", "proxy",
+					"proxy_id", selectedProxy.ID,
+					"proxy_address", selectedProxy.Address,
+					"retry", retry+1,
+					"url", req.URL.String(),
+					"error", err,
+				)
+				continue
+			}
+			clonedReq.Body = freshBody
+			// DEBUG: proves "invalid Read on closed Body" fix - retry using fresh body from GetBody (comment out in prod)
+			if retry > 0 {
+				h.logger.Info("retry using fresh body from GetBody (closed-Body fix verified)",
+					"source", "proxy",
+					"proxy_id", selectedProxy.ID,
+					"proxy_address", selectedProxy.Address,
+					"retry", retry+1,
+					"url", req.URL.String(),
+				)
+			}
+		}
 
 		// CRITICAL FIX: Clear RequestURI for client requests
 		// RequestURI is only for server-side, not for outgoing client requests
