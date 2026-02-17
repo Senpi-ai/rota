@@ -135,7 +135,7 @@ func run() error {
 	defer logCleanupService.Stop()
 
 	// Create servers
-	proxyServer, err := proxy.New(cfg.ProxyPort, log, proxyRepo, settingsRepo)
+	proxyServer, err := proxy.New(cfg.ProxyPort, log, proxyRepo, settingsRepo, cfg.HyperliquidAuthEnabled, cfg.PrivyAppID, cfg.PrivyTokenVerificationKey, cfg.PrivyAppIDDev, cfg.PrivyTokenVerificationKeyDev)
 	if err != nil {
 		return fmt.Errorf("failed to create proxy server: %w", err)
 	}

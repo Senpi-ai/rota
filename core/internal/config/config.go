@@ -4,19 +4,26 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 )
 
 // Config holds all application configuration
 type Config struct {
-	ProxyPort                int
-	APIPort                  int
-	LogLevel                 string
-	Database                 DatabaseConfig
-	AdminUser                string
-	AdminPass                string
-	WebshareAPIKey           string
+	ProxyPort                  int
+	APIPort                    int
+	LogLevel                   string
+	Database                   DatabaseConfig
+	AdminUser                  string
+	AdminPass                  string
+	WebshareAPIKey             string
 	WebshareSyncIntervalSeconds int
-	WebshareMode             string
+	WebshareMode               string
+	// Hyperliquid proxy auth (port 8000): when true, /hyperliquid and /hyperliquid/* require Privy Bearer token (prod); /dev/hyperliquid* uses dev credentials. Tokens are verified locally with ES256 and PRIVY_TOKEN_VERIFICATION_KEY.
+	HyperliquidAuthEnabled     bool
+	PrivyAppID                 string
+	PrivyTokenVerificationKey  string // PEM-encoded EC public key for ES256 (prod)
+	PrivyAppIDDev              string
+	PrivyTokenVerificationKeyDev string // PEM-encoded EC public key for ES256 (dev)
 }
 
 // DatabaseConfig holds database configuration
@@ -53,9 +60,14 @@ func Load() (*Config, error) {
 		},
 		AdminUser:                getEnv("ROTA_ADMIN_USER", "admin"),
 		AdminPass:                getEnv("ROTA_ADMIN_PASSWORD", "admin"),
-		WebshareAPIKey:           getEnv("WEBSHARE_API_KEY", ""),
+		WebshareAPIKey:             getEnv("WEBSHARE_API_KEY", ""),
 		WebshareSyncIntervalSeconds: getEnvAsInt("WEBSHARE_SYNC_INTERVAL_SECONDS", 0),
-		WebshareMode:             getEnv("WEBSHARE_MODE", "direct"),
+		WebshareMode:                getEnv("WEBSHARE_MODE", "direct"),
+		HyperliquidAuthEnabled:       getEnvAsBool("ROTA_HYPERLIQUID_AUTH_ENABLED", false),
+		PrivyAppID:                  getEnv("PRIVY_APP_ID", ""),
+		PrivyTokenVerificationKey:    getEnv("PRIVY_TOKEN_VERIFICATION_KEY", ""),
+		PrivyAppIDDev:               getEnv("PRIVY_APP_ID_DEV", ""),
+		PrivyTokenVerificationKeyDev: getEnv("PRIVY_TOKEN_VERIFICATION_KEY_DEV", ""),
 	}
 
 	if err := cfg.Validate(); err != nil {
@@ -93,6 +105,18 @@ func (c *Config) Validate() error {
 	}
 
 	return nil
+}
+
+// getEnvAsBool retrieves an environment variable as a boolean (true for "true", "1", "yes"; default otherwise)
+func getEnvAsBool(key string, defaultValue bool) bool {
+	switch v := os.Getenv(key); strings.ToLower(v) {
+	case "true", "1", "yes":
+		return true
+	case "false", "0", "no", "":
+		return false
+	default:
+		return defaultValue
+	}
 }
 
 // getEnv retrieves an environment variable or returns a default value

@@ -70,6 +70,12 @@ Environment variables are loaded in `core/internal/config/config.go`.
 - `WEBSHARE_API_KEY` (default empty, enables Webshare sync)
 - `WEBSHARE_SYNC_INTERVAL_SECONDS` (default `0`, disables auto-sync)
 - `WEBSHARE_MODE` (`direct|backbone`, default `direct`)
+- `ROTA_HYPERLIQUID_AUTH_ENABLED` (default `false`): when `true`, `/hyperliquid*` and `/dev/hyperliquid*` require `Authorization: Bearer <privy_access_token>` (prod and dev credentials respectively). If auth is enabled but the relevant environment's credentials are not set, the proxy returns 503 "Auth not configured".
+- `PRIVY_APP_ID` (default `""`): Privy app id for prod (used for `/hyperliquid*`); must match the token's `aud` claim.
+- `PRIVY_TOKEN_VERIFICATION_KEY` (default `""`): PEM-encoded EC public key for ES256 token signature verification (prod). Obtain from [Privy's JWT auth setup](https://docs.privy.io/authentication/user-authentication/jwt-based-auth/setup) or by converting Privy's JWKS to PEM.
+- `PRIVY_APP_ID_DEV` (default `""`): Privy app id for dev (used for `/dev/hyperliquid*`).
+- `PRIVY_TOKEN_VERIFICATION_KEY_DEV` (default `""`): PEM-encoded EC public key for ES256 (dev). Same as above for the dev Privy app.
+- Tokens are validated locally (signature + `aud`, `iss`, `exp`); no call to Privy's API. The `Authorization` header is never forwarded to `https://api.hyperliquid.xyz`; it is used only for validation and then stripped before the request is sent upstream.
 
 ## Recent Updates
 - Added `GET /health` on the proxy server (port `8000`) for liveness checks.
@@ -132,7 +138,9 @@ Base URL: `http://<host>:8001`
 ## Proxy Server Endpoints (Port 8000)
 - `GET /health` — lightweight liveness JSON.
 - Standard proxy protocol handling for HTTP/HTTPS CONNECT.
-- Direct passthrough for `/hyperliquid/*` to `https://api.hyperliquid.xyz`.
+- **Prod:** Direct passthrough for `/hyperliquid` and `/hyperliquid/*` to `https://api.hyperliquid.xyz`. When auth is enabled, these paths require `Authorization: Bearer <privy_access_token>` validated locally with ES256 and `PRIVY_APP_ID` + `PRIVY_TOKEN_VERIFICATION_KEY`. If auth is enabled but prod app ID or verification key is not set, returns 503 "Auth not configured".
+- **Dev:** `/dev/hyperliquid` and `/dev/hyperliquid/*` behave the same (path rewritten to `https://api.hyperliquid.xyz/{path}`) but use `PRIVY_APP_ID_DEV` + `PRIVY_TOKEN_VERIFICATION_KEY_DEV` for token validation. If auth is enabled but dev app ID or verification key is not set, returns 503 "Auth not configured".
+- The client's `Authorization` header is never sent to api.hyperliquid.xyz; it is stripped before the request is forwarded.
 
 ## Key Workflows
 ### Proxy Request Flow

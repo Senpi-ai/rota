@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/alpkeskin/rota/core/internal/auth"
 	"github.com/alpkeskin/rota/core/internal/repository"
 	"github.com/alpkeskin/rota/core/pkg/logger"
 	"github.com/elazarl/goproxy"
@@ -20,28 +21,37 @@ var startTime = time.Now()
 
 // Server represents the proxy server
 type Server struct {
-	proxy          *goproxy.ProxyHttpServer
-	server         *http.Server
-	logger         *logger.Logger
-	port           int
-	selector       ProxySelector
-	tracker        *UsageTracker
-	handler        *UpstreamProxyHandler
-	authMiddleware *AuthMiddleware
-	rateLimitMw    *RateLimitMiddleware
-	proxyRepo      *repository.ProxyRepository
-	settingsRepo   *repository.SettingsRepository
-	refreshTicker  *time.Ticker
-	cleanupTicker  *time.Ticker
-	stopChan       chan struct{}
+	proxy                   *goproxy.ProxyHttpServer
+	server                  *http.Server
+	logger                  *logger.Logger
+	port                    int
+	selector                ProxySelector
+	tracker                 *UsageTracker
+	handler                 *UpstreamProxyHandler
+	authMiddleware          *AuthMiddleware
+	rateLimitMw             *RateLimitMiddleware
+	proxyRepo               *repository.ProxyRepository
+	settingsRepo            *repository.SettingsRepository
+	refreshTicker           *time.Ticker
+	cleanupTicker           *time.Ticker
+	stopChan                chan struct{}
+	hyperliquidAuthEnabled     bool
+	privyAppID                 string
+	privyTokenVerificationKey  string
+	privyAppIDDev              string
+	privyTokenVerificationKeyDev string
 }
 
-// New creates a new proxy server instance
+// New creates a new proxy server instance.
+// When hyperliquidAuthEnabled is true, /hyperliquid* uses prod Privy creds; /dev/hyperliquid* uses dev creds. Auth tokens are never forwarded to api.hyperliquid.xyz.
 func New(
 	port int,
 	log *logger.Logger,
 	proxyRepo *repository.ProxyRepository,
 	settingsRepo *repository.SettingsRepository,
+	hyperliquidAuthEnabled bool,
+	privyAppID, privyTokenVerificationKey string,
+	privyAppIDDev, privyTokenVerificationKeyDev string,
 ) (*Server, error) {
 	// Load settings
 	ctx := context.Background()
@@ -134,6 +144,8 @@ func New(
 			req.URL = parsedURL
 			req.Host = "api.hyperliquid.xyz"
 			req.Header.Set("Host", "api.hyperliquid.xyz")
+			// Do not forward client auth token to api.hyperliquid.xyz
+			req.Header.Del("Authorization")
 		}
 
 		// Authentication middleware
@@ -190,12 +202,119 @@ func New(
 			return
 		}
 
+		// /dev/hyperliquid and /dev/hyperliquid/* — same as /hyperliquid but auth with dev Privy credentials
+		if r.URL.Path == "/dev/hyperliquid" || strings.HasPrefix(r.URL.Path, "/dev/hyperliquid/") {
+			log.Info("intercepting dev hyperliquid request",
+				"source", "proxy",
+				"path", r.URL.Path,
+			)
+
+			if hyperliquidAuthEnabled {
+				if privyAppIDDev == "" || privyTokenVerificationKeyDev == "" {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusServiceUnavailable)
+					_ = json.NewEncoder(w).Encode(map[string]string{
+						"error":   "Service Unavailable",
+						"message": "Auth not configured",
+					})
+					return
+				}
+				authHeader := r.Header.Get("Authorization")
+				token := auth.ExtractBearerToken(authHeader)
+				privyID, isAuthorised, err := auth.Authorize(r.Context(), token, privyAppIDDev, privyTokenVerificationKeyDev, log)
+				if err != nil || !isAuthorised {
+					log.Error("dev hyperliquid auth failed", "path", r.URL.Path, "error", err)
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusUnauthorized)
+					_ = json.NewEncoder(w).Encode(map[string]string{
+						"error":   "Unauthorized",
+						"message": "Invalid or missing authentication token",
+					})
+					return
+				}
+				r = r.WithContext(context.WithValue(r.Context(), auth.PrivyDIDKey, privyID))
+			}
+
+			hyperliquidPath := strings.TrimPrefix(r.URL.Path, "/dev/hyperliquid")
+			if hyperliquidPath == "" {
+				hyperliquidPath = "/"
+			}
+			newURL := fmt.Sprintf("https://api.hyperliquid.xyz%s", hyperliquidPath)
+			if r.URL.RawQuery != "" {
+				newURL += "?" + r.URL.RawQuery
+			}
+			parsedURL, err := url.Parse(newURL)
+			if err != nil {
+				log.Error("failed to parse dev hyperliquid URL", "url", newURL, "error", err)
+				http.Error(w, "Failed to parse hyperliquid URL", http.StatusBadGateway)
+				return
+			}
+			newReq := r.Clone(r.Context())
+			newReq.URL = parsedURL
+			newReq.Host = "api.hyperliquid.xyz"
+			newReq.Header.Set("Host", "api.hyperliquid.xyz")
+			newReq.RequestURI = ""
+			newReq.Header.Del("Authorization")
+
+			proxyCtx := &goproxy.ProxyCtx{Req: newReq, Resp: nil, Session: 0}
+			if _, resp := rateLimitMw.HandleRequest(newReq, proxyCtx); resp != nil {
+				log.Info("rate limited", "source", "hl-proxy", "path", r.URL.Path)
+				resp.Write(w)
+				return
+			}
+			_, resp := handler.HandleRequest(newReq, proxyCtx)
+			if resp != nil {
+				for key, values := range resp.Header {
+					for _, value := range values {
+						w.Header().Add(key, value)
+					}
+				}
+				w.WriteHeader(resp.StatusCode)
+				if resp.Body != nil {
+					defer resp.Body.Close()
+					io.Copy(w, resp.Body)
+				}
+				return
+			}
+			log.Error("no response from handler", "source", "proxy", "path", r.URL.Path)
+			http.Error(w, "No response from handler", http.StatusInternalServerError)
+			return
+		}
+
 		// Check if this is a direct HTTP request to /hyperliquid/*
 		if r.URL.Path == "/hyperliquid" || strings.HasPrefix(r.URL.Path, "/hyperliquid/") {
 			log.Info("intercepting hyperliquid request",
 				"source", "proxy",
 				"path", r.URL.Path,
 			)
+
+			// Config-driven Privy auth: when enabled, require valid Bearer token and prod credentials
+			if hyperliquidAuthEnabled {
+				if privyAppID == "" || privyTokenVerificationKey == "" {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusServiceUnavailable)
+					_ = json.NewEncoder(w).Encode(map[string]string{
+						"error":   "Service Unavailable",
+						"message": "Auth not configured",
+					})
+					return
+				}
+				authHeader := r.Header.Get("Authorization")
+				token := auth.ExtractBearerToken(authHeader)
+				privyID, isAuthorised, err := auth.Authorize(r.Context(), token, privyAppID, privyTokenVerificationKey, log)
+				if err != nil || !isAuthorised {
+					log.Error("hyperliquid auth failed", "path", r.URL.Path, "error", err)
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusUnauthorized)
+					_ = json.NewEncoder(w).Encode(map[string]string{
+						"error":   "Unauthorized",
+						"message": "Invalid or missing authentication token",
+					})
+					return
+				}
+				r = r.WithContext(context.WithValue(r.Context(), auth.PrivyDIDKey, privyID))
+			}
+
 			// This is a direct HTTP request, not a proxy request
 			// Handle it directly by calling the handler logic
 
@@ -225,19 +344,17 @@ func New(
 			newReq.URL = parsedURL
 			newReq.Host = "api.hyperliquid.xyz"
 			newReq.Header.Set("Host", "api.hyperliquid.xyz")
-			// Ensure RequestURI is cleared for client requests
 			newReq.RequestURI = ""
+			// Do not forward client auth token to api.hyperliquid.xyz
+			newReq.Header.Del("Authorization")
 
 			// Create a proxy context for the handler
-			// The handler uses ctx.Req.Context(), so we need to set Req to newReq
 			proxyCtx := &goproxy.ProxyCtx{
-				Req:     newReq, // Handler uses ctx.Req.Context()
+				Req:     newReq,
 				Resp:    nil,
 				Session: 0,
 			}
 
-			// Process through middleware and handler
-			// Authentication middleware (skip for public endpoint - /hyperliquid/* is public)
 			// Rate limiting middleware
 			if _, resp := rateLimitMw.HandleRequest(newReq, proxyCtx); resp != nil {
 				log.Info("rate limited",
@@ -248,8 +365,7 @@ func New(
 				return
 			}
 
-			// Main handler - this will forward through proxy pool
-			// The handler modifies the request, so we pass newReq
+			// Main handler - forward through proxy pool
 			log.Info("calling handler for hyperliquid request",
 				"source", "hl-proxy",
 				"url", newReq.URL.String(),
@@ -298,18 +414,23 @@ func New(
 	}
 
 	s := &Server{
-		proxy:          proxyServer,
-		server:         httpServer,
-		logger:         log,
-		port:           port,
-		selector:       selector,
-		tracker:        tracker,
-		handler:        handler,
-		authMiddleware: authMiddleware,
-		rateLimitMw:    rateLimitMw,
-		proxyRepo:      proxyRepo,
-		settingsRepo:   settingsRepo,
-		stopChan:       make(chan struct{}),
+		proxy:                  proxyServer,
+		server:                 httpServer,
+		logger:                 log,
+		port:                   port,
+		selector:               selector,
+		tracker:                tracker,
+		handler:                handler,
+		authMiddleware:         authMiddleware,
+		rateLimitMw:            rateLimitMw,
+		proxyRepo:              proxyRepo,
+		settingsRepo:           settingsRepo,
+		stopChan:               make(chan struct{}),
+		hyperliquidAuthEnabled: hyperliquidAuthEnabled,
+		privyAppID:                 privyAppID,
+		privyTokenVerificationKey:  privyTokenVerificationKey,
+		privyAppIDDev:              privyAppIDDev,
+		privyTokenVerificationKeyDev: privyTokenVerificationKeyDev,
 	}
 
 	// Start background tasks
