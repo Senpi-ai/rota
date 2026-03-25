@@ -21,24 +21,24 @@ var startTime = time.Now()
 
 // Server represents the proxy server
 type Server struct {
-	proxy                   *goproxy.ProxyHttpServer
-	server                  *http.Server
-	logger                  *logger.Logger
-	port                    int
-	selector                ProxySelector
-	tracker                 *UsageTracker
-	handler                 *UpstreamProxyHandler
-	authMiddleware          *AuthMiddleware
-	rateLimitMw             *RateLimitMiddleware
-	proxyRepo               *repository.ProxyRepository
-	settingsRepo            *repository.SettingsRepository
-	refreshTicker           *time.Ticker
-	cleanupTicker           *time.Ticker
-	stopChan                chan struct{}
-	hyperliquidAuthEnabled     bool
-	privyAppID                 string
-	privyTokenVerificationKey  string
-	privyAppIDDev              string
+	proxy                        *goproxy.ProxyHttpServer
+	server                       *http.Server
+	logger                       *logger.Logger
+	port                         int
+	selector                     ProxySelector
+	tracker                      *UsageTracker
+	handler                      *UpstreamProxyHandler
+	authMiddleware               *AuthMiddleware
+	rateLimitMw                  *RateLimitMiddleware
+	proxyRepo                    *repository.ProxyRepository
+	settingsRepo                 *repository.SettingsRepository
+	refreshTicker                *time.Ticker
+	cleanupTicker                *time.Ticker
+	stopChan                     chan struct{}
+	hyperliquidAuthEnabled       bool
+	privyAppID                   string
+	privyTokenVerificationKey    string
+	privyAppIDDev                string
 	privyTokenVerificationKeyDev string
 }
 
@@ -414,22 +414,22 @@ func New(
 	}
 
 	s := &Server{
-		proxy:                  proxyServer,
-		server:                 httpServer,
-		logger:                 log,
-		port:                   port,
-		selector:               selector,
-		tracker:                tracker,
-		handler:                handler,
-		authMiddleware:         authMiddleware,
-		rateLimitMw:            rateLimitMw,
-		proxyRepo:              proxyRepo,
-		settingsRepo:           settingsRepo,
-		stopChan:               make(chan struct{}),
-		hyperliquidAuthEnabled: hyperliquidAuthEnabled,
-		privyAppID:                 privyAppID,
-		privyTokenVerificationKey:  privyTokenVerificationKey,
-		privyAppIDDev:              privyAppIDDev,
+		proxy:                        proxyServer,
+		server:                       httpServer,
+		logger:                       log,
+		port:                         port,
+		selector:                     selector,
+		tracker:                      tracker,
+		handler:                      handler,
+		authMiddleware:               authMiddleware,
+		rateLimitMw:                  rateLimitMw,
+		proxyRepo:                    proxyRepo,
+		settingsRepo:                 settingsRepo,
+		stopChan:                     make(chan struct{}),
+		hyperliquidAuthEnabled:       hyperliquidAuthEnabled,
+		privyAppID:                   privyAppID,
+		privyTokenVerificationKey:    privyTokenVerificationKey,
+		privyAppIDDev:                privyAppIDDev,
 		privyTokenVerificationKeyDev: privyTokenVerificationKeyDev,
 	}
 

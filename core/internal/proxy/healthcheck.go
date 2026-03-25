@@ -248,6 +248,86 @@ func (h *HealthChecker) CheckAllProxies(ctx context.Context) ([]models.ProxyTest
 	return results, nil
 }
 
+// CheckFailedProxies finds proxies with status 'failed' whose last_check is at least
+// retestAfterMinutes ago, re-runs health check on them, and returns the results.
+func (h *HealthChecker) CheckFailedProxies(ctx context.Context, retestAfterMinutes int) ([]models.ProxyTestResult, error) {
+	// Load settings
+	settings, err := h.settingsRepo.GetAll(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load settings: %w", err)
+	}
+	h.settings = &settings.HealthCheck
+
+	query := `
+		SELECT
+			id, address, protocol, username, password, status,
+			requests, successful_requests, failed_requests,
+			avg_response_time, last_check, last_error, created_at, updated_at
+		FROM proxies
+		WHERE status = 'failed'
+		  AND (last_check IS NULL OR last_check < NOW() - ($1::int * interval '1 minute'))
+		ORDER BY address
+	`
+
+	rows, err := h.proxyRepo.GetDB().Pool.Query(ctx, query, retestAfterMinutes)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get failed proxies: %w", err)
+	}
+	defer rows.Close()
+
+	proxies := make([]*models.Proxy, 0)
+	for rows.Next() {
+		var p models.Proxy
+		err := rows.Scan(
+			&p.ID, &p.Address, &p.Protocol, &p.Username, &p.Password, &p.Status,
+			&p.Requests, &p.SuccessfulRequests, &p.FailedRequests,
+			&p.AvgResponseTime, &p.LastCheck, &p.LastError, &p.CreatedAt, &p.UpdatedAt,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan proxy: %w", err)
+		}
+		proxies = append(proxies, &p)
+	}
+
+	if len(proxies) == 0 {
+		return []models.ProxyTestResult{}, nil
+	}
+
+	h.logger.Info("retesting failed proxies", "proxy_count", len(proxies), "workers", h.settings.Workers)
+
+	wp := workerpool.New(h.settings.Workers)
+	results := make([]models.ProxyTestResult, len(proxies))
+
+	for i, proxy := range proxies {
+		idx := i
+		p := proxy
+		wp.Submit(func() {
+			result, err := h.CheckProxy(ctx, p)
+			if err != nil {
+				h.logger.Error("failed proxy retest error",
+					"proxy_id", p.ID,
+					"proxy_address", p.Address,
+					"error", err,
+				)
+				results[idx] = models.ProxyTestResult{
+					ID:       p.ID,
+					Address:  p.Address,
+					Status:   "failed",
+					TestedAt: time.Now(),
+				}
+				errMsg := err.Error()
+				results[idx].Error = &errMsg
+			} else {
+				results[idx] = *result
+			}
+		})
+	}
+
+	wp.StopWait()
+
+	return results, nil
+}
+
 // createTransport creates an HTTP transport for the proxy
 func (h *HealthChecker) createTransport(p *models.Proxy) (*http.Transport, error) {
 	// Use shared transport creation utility

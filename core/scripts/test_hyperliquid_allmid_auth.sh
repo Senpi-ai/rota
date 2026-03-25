@@ -10,6 +10,9 @@ ROTA_PROXY_URL="${ROTA_PROXY_URL:-http://localhost:8000}"
 BODY='{"type":"allMids"}'
 INVALID_TOKEN="${INVALID_PRIVY_TOKEN:-invalid-token}"
 
+# ✅ Add Host header for all requests
+HOST_HEADER_VALUE="${HOST_HEADER_VALUE:-delegate.senpi.ai}"
+
 TOTAL_PASS=0
 TOTAL_FAIL=0
 
@@ -19,10 +22,13 @@ run_test() {
   local expected_status="$3"
   local extra_args=("${@:4}")
   local status
+
   status=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$endpoint" \
     -H "Content-Type: application/json" \
+    -H "Host: ${HOST_HEADER_VALUE}" \
     -d "$BODY" \
     "${extra_args[@]}")
+
   if [ "$status" = "$expected_status" ]; then
     echo "    PASS: $name (HTTP $status)"
     ((TOTAL_PASS++)) || true
@@ -33,6 +39,7 @@ run_test() {
     return 1
   fi
 }
+
 # Don't exit on first failure so we see all results
 set +e
 
@@ -53,6 +60,7 @@ run_endpoint() {
 
 echo "Hyperliquid allMids auth tests (prod + dev)"
 echo "Proxy base: $ROTA_PROXY_URL"
+echo "Host header: $HOST_HEADER_VALUE"
 
 run_endpoint "Prod" "${ROTA_PROXY_URL}/hyperliquid/info"
 run_endpoint "Dev"  "${ROTA_PROXY_URL}/dev/hyperliquid/info"
@@ -61,3 +69,4 @@ echo ""
 echo "Result: $TOTAL_PASS passed, $TOTAL_FAIL failed"
 [ "$TOTAL_FAIL" -eq 0 ]
 exit $?
+
